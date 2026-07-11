@@ -43,7 +43,7 @@ namespace WeaponRestrict
 
         [JsonIgnore]
         public const string WEAPON_QUOTAS = "WeaponQuotas";
-        
+
         [JsonIgnore]
         public const string WEAPON_LIMITS = "WeaponLimits";
 
@@ -75,14 +75,15 @@ namespace WeaponRestrict
         [JsonPropertyName("VIPFlag")] public string VIPFlag { get; set; } = "@css/vip";
 
         [JsonPropertyName("MapConfigs")]
-        public Dictionary<string, MapConfig> MapConfigs { get; set; } = new Dictionary<string, MapConfig>() {
+        public Dictionary<string, MapConfig> MapConfigs { get; set; } = new Dictionary<string, MapConfig>()
+        {
             ["awp.*"] = new MapConfig()
             {
                 WeaponQuotas = [],
                 WeaponLimits = []
             }
         };
-        
+
         [JsonPropertyName("ConfigVersion")] public new int Version { get; set; } = CONFIG_VERSION;
     }
 
@@ -91,7 +92,7 @@ namespace WeaponRestrict
     {
         public override string ModuleName => "WeaponRestrict";
 
-        public override string ModuleVersion => "2.0.0";
+        public override string ModuleVersion => GetType().Assembly.GetName().Version?.ToString(3) ?? "unknown";
 
         public override string ModuleAuthor => "jon, sapphyrus, FireBird & stefanx111";
 
@@ -103,22 +104,25 @@ namespace WeaponRestrict
         /// The current map config.
         /// </summary>
         public MapConfig CurrentMapConfig { get; set; } = new();
-        
+
         /// <summary>
-		/// Quick lookup of all restricted weapons (generated on Setup())
-		/// </summary>
-		public readonly HashSet<string> RestrictedWeapons = [];
+        /// Quick lookup of all restricted weapons (generated on Setup())
+        /// </summary>
+        public readonly HashSet<string> RestrictedWeapons = [];
 
         /// <summary>
 		/// (UserID, Time) of last message sent to player
 		/// </summary>
-		public readonly Dictionary<int, float> LastPlayerMessage = [];
+        public readonly Dictionary<int, float> LastPlayerMessage = [];
+
+        private readonly List<(string Pattern, Regex Matcher, MapConfig Config)> _mapConfigMatchers = [];
+        private bool _hasLoggedMissingWeaponData;
 
         public bool InWarmup = false;
 
         public CCSGameRules? gameRules;
 
-#region CS# functions
+        #region CS# functions
         public void OnConfigParsed(WeaponRestrictConfig loadedConfig)
         {
             loadedConfig = ConfigManager.Load<WeaponRestrictConfig>("WeaponRestrict");
@@ -129,12 +133,18 @@ namespace WeaponRestrict
             }
 
             // Format chat colors
-            loadedConfig.MessagePrefix     = "\u1010" + FormatChatColors(loadedConfig.MessagePrefix);
-            loadedConfig.DisabledMessage   = FormatChatColors(loadedConfig.DisabledMessage);
-            loadedConfig.RestrictMessage   = FormatChatColors(loadedConfig.RestrictMessage);
+            loadedConfig.MessagePrefix = "\u1010" + FormatChatColors(loadedConfig.MessagePrefix);
+            loadedConfig.DisabledMessage = FormatChatColors(loadedConfig.DisabledMessage);
+            loadedConfig.RestrictMessage = FormatChatColors(loadedConfig.RestrictMessage);
 
             Config = loadedConfig;
 
+            PluginSafety.NormalizeMapConfig(Config.DefaultConfig);
+            foreach (var mapConfig in Config.MapConfigs.Values)
+                PluginSafety.NormalizeMapConfig(mapConfig);
+            Config.MessageCooldownSeconds = Math.Clamp(Config.MessageCooldownSeconds, 0f, 3600f);
+
+            CompileMapConfigMatchers();
             LoadMapConfig();
         }
 
@@ -197,17 +207,17 @@ namespace WeaponRestrict
                 commandInfo.ReplyToCommand("WeaponRestrict: Please specify a weapon name");
                 return;
             }
-            
+
             if (commandType == "none")
             {
-                
+
                 CurrentMapConfig.WeaponQuotas.Remove(weapon);
                 CurrentMapConfig.WeaponLimits.Remove(weapon);
 
                 commandInfo.ReplyToCommand($"WeaponRestrict: \"{weapon}\" is now unrestricted.");
                 return;
             }
-            
+
             if (!float.TryParse(commandInfo.GetArg(3), out float limit))
             {
                 limit = -1f;
@@ -257,21 +267,20 @@ namespace WeaponRestrict
                     break;
             }
         }
-#endregion
+        #endregion
 
-#region Static Helpers
+        #region Static Helpers
         /// <summary>
         /// Gets the CCSGameRules entity
         /// </summary>
-        /// <exception cref="Exception">Thrown when no CCSGameRules entity is found</exception>
-        private static CCSGameRules GetGameRules()
+        private static CCSGameRules? GetGameRules()
         {
             foreach (CBaseEntity entity in Utilities.FindAllEntitiesByDesignerName<CBaseEntity>("cs_gamerules"))
             {
                 return new CCSGameRules(entity.Handle);
             }
 
-            throw new Exception("No CCSGameRules found!");
+            return null;
         }
         /// <summary>
         /// Removes item prefixes from items for chat messages
@@ -290,12 +299,12 @@ namespace WeaponRestrict
 		/// Get all weapon names from <paramref name="config"/>
         /// </summary>
 		private static HashSet<string> GetConfigWeapons(MapConfig config)
-		{
-			HashSet<string> weapons = [];
-			weapons.UnionWith(config.WeaponLimits.Keys);
-			weapons.UnionWith(config.WeaponQuotas.Keys);
-			return weapons;
-		}
+        {
+            HashSet<string> weapons = [];
+            weapons.UnionWith(config.WeaponLimits.Keys);
+            weapons.UnionWith(config.WeaponQuotas.Keys);
+            return weapons;
+        }
 
         /// <summary>
         /// Formats chat color codes from readable format to actual color codes
@@ -316,13 +325,13 @@ namespace WeaponRestrict
             return s;
         }
 
-        private static CCSWeaponBaseVData GetWeaponVData(CEconItemView econItemView)
+        private static CCSWeaponBaseVData? GetWeaponVData(CEconItemView econItemView)
         {
-            return VirtualFunctions.GetCSWeaponDataFromKeyFunc.Invoke(-1, econItemView.ItemDefinitionIndex.ToString()) ?? throw new Exception("Failed to get CCSWeaponBaseVData");
+            return VirtualFunctions.GetCSWeaponDataFromKeyFunc.Invoke(-1, econItemView.ItemDefinitionIndex.ToString());
         }
-#endregion
+        #endregion
 
-#region Instance Helpers
+        #region Instance Helpers
 
         /// <summary>
         /// Set up on map start (load config)
@@ -330,16 +339,36 @@ namespace WeaponRestrict
         private void Setup()
         {
             gameRules = GetGameRules();
+            if (gameRules is null)
+                Logger.LogWarning("No CCSGameRules entity was found; buy-time pickup handling will remain disabled until the next map setup.");
+
             LoadMapConfig();
 
             // Get every restricted weapon and store it
             HashSet<string> allRestrictedWeapons = GetConfigWeapons(Config.DefaultConfig);
-			foreach (var mapConfig in Config.MapConfigs.Values)
+            foreach (var mapConfig in Config.MapConfigs.Values)
             {
                 allRestrictedWeapons.UnionWith(GetConfigWeapons(mapConfig));
-			}
+            }
 
+            RestrictedWeapons.Clear();
             RestrictedWeapons.UnionWith(allRestrictedWeapons);
+        }
+
+        private void CompileMapConfigMatchers()
+        {
+            _mapConfigMatchers.Clear();
+
+            foreach (var (pattern, config) in Config.MapConfigs)
+            {
+                if (PluginSafety.TryCreateMapRegex(pattern, out var matcher, out var error))
+                {
+                    _mapConfigMatchers.Add((pattern, matcher!, config));
+                    continue;
+                }
+
+                Logger.LogWarning("Ignoring invalid map config pattern {Pattern}: {Error}", pattern, error);
+            }
         }
         /// <summary>
         /// Counts the amount of <paramref name="designerName"/> weapons on <paramref name="players"/>
@@ -356,8 +385,8 @@ namespace WeaponRestrict
                     continue;
 
                 // Null and alive check
-                if (player.PlayerPawn?.Value?.WeaponServices?.MyWeapons == null 
-                    || !player.PawnIsAlive 
+                if (player.PlayerPawn?.Value?.WeaponServices?.MyWeapons == null
+                    || !player.PawnIsAlive
                     || !player.PlayerPawn.Value.IsValid)
                 {
                     continue;
@@ -385,35 +414,47 @@ namespace WeaponRestrict
             if (Server.MapName == null) return; // Null check on server boot
 
             MapConfig? mapConfig = null;
-			// Exact match first (if false, try wildcard inside if statement, will null check again later)
-			if (!Config.MapConfigs.TryGetValue(Server.MapName, out mapConfig))
+            // Exact match first (if false, try wildcard inside if statement, will null check again later)
+            if (!Config.MapConfigs.TryGetValue(Server.MapName, out mapConfig))
             {
-				// Wildcard match
-				mapConfig = null;
-                var cfgEnum = Config.MapConfigs.Where(x => Regex.IsMatch(Server.MapName, $"^{x.Key}$")).Select(x => x.Value);
-
-                if (cfgEnum.Any())
+                // Regex match. Patterns are compiled once with a short timeout.
+                mapConfig = null;
+                var matches = new List<MapConfig>();
+                foreach (var entry in _mapConfigMatchers)
                 {
-                    if (cfgEnum.Count() > 1)
+                    try
+                    {
+                        if (entry.Matcher.IsMatch(Server.MapName))
+                            matches.Add(entry.Config);
+                    }
+                    catch (RegexMatchTimeoutException)
+                    {
+                        Logger.LogWarning("Map config pattern {Pattern} timed out for {MapName}; ignoring it.", entry.Pattern, Server.MapName);
+                    }
+                }
+
+                if (matches.Count > 0)
+                {
+                    if (matches.Count > 1)
                         Logger.LogWarning("Ambiguous wildcard search for {Mapname} in configs.", Server.MapName);
 
-					// Load the found wildcard config
-					mapConfig = cfgEnum.First();
+                    // Load the found wildcard config
+                    mapConfig = matches[0];
                 }
             }
 
             // Load default if no map config found
             bool isDefault = mapConfig == null;
-			mapConfig ??= Config.DefaultConfig;
+            mapConfig ??= Config.DefaultConfig;
 
-			// Set current map config
-			CurrentMapConfig = mapConfig;
+            // Set current map config
+            CurrentMapConfig = mapConfig;
 
             // Logging
             var configType = isDefault ? "default " : "";
             if (CurrentMapConfig.WeaponLimits.Count == 0 && CurrentMapConfig.WeaponQuotas.Count == 0)
             {
-                Logger.LogInformation("Loaded {ConfigType}config for {MapName} (no restrictions)", 
+                Logger.LogInformation("Loaded {ConfigType}config for {MapName} (no restrictions)",
                     configType, Server.MapName);
                 return;
             }
@@ -431,14 +472,14 @@ namespace WeaponRestrict
         private (RestrictReason reason, int limit) GetRestriction(string weaponName, CCSPlayerController client)
         {
             int limit = int.MaxValue;
-            
+
             // Get every valid player that is currently connected
             // Don't filter out dead players here, as they still count towards the limit
-            IEnumerable<CCSPlayerController> players = Utilities.GetPlayers().Where(player =>
+            List<CCSPlayerController> players = Utilities.GetPlayers().Where(player =>
                 player.IsValid
                 && player.Connected == PlayerConnectedState.PlayerConnected
                 && (!Config.DoTeamCheck || player.Team == client.Team)
-                );
+                ).ToList();
 
             // Check quota (if exists)
             if (CurrentMapConfig.WeaponQuotas.TryGetValue(weaponName, out float cfgQuota))
@@ -461,7 +502,7 @@ namespace WeaponRestrict
                 // Weapon is fully blocked
                 if (cfgLimit == 0)
                     return (RestrictReason.Disabled, 0);
-                
+
                 if (cfgLimit <= limit)
                 {
                     limit = cfgLimit;
@@ -476,7 +517,7 @@ namespace WeaponRestrict
             // All checks passed, weapon is not restricted
             return (RestrictReason.NotRestricted, 0);
         }
-#endregion
+        #endregion
 
         public HookResult OnWeaponCanAcquire(DynamicHook hook)
         {
@@ -485,20 +526,37 @@ namespace WeaponRestrict
                 return HookResult.Continue;
 
             var acquireMethod = hook.GetParam<AcquireMethod>(2);
-            
+
             if (gameRules != null)
             {
                 if (Config.AllowPickup && gameRules.BuyTimeEnded && acquireMethod == AcquireMethod.PickUp)
                     return HookResult.Continue;
             }
 
-            string weaponName = GetWeaponVData(hook.GetParam<CEconItemView>(1)).Name;
+            var weaponData = GetWeaponVData(hook.GetParam<CEconItemView>(1));
+            if (weaponData is null || string.IsNullOrEmpty(weaponData.Name))
+            {
+                if (!_hasLoggedMissingWeaponData)
+                {
+                    _hasLoggedMissingWeaponData = true;
+                    Logger.LogWarning("Unable to resolve weapon VData during acquire hook; allowing the acquisition. Further occurrences will be suppressed.");
+                }
+                return HookResult.Continue;
+            }
+
+            string weaponName = weaponData.Name;
 
             // Weapon is not restricted
             if (!RestrictedWeapons.Contains(weaponName))
                 return HookResult.Continue;
 
-            CCSPlayerController client = hook.GetParam<CCSPlayer_ItemServices>(0).Pawn.Value!.Controller.Value!.As<CCSPlayerController>();
+            var itemServices = hook.GetParam<CCSPlayer_ItemServices>(0);
+            var pawn = itemServices?.Pawn.Value;
+            var controller = pawn?.Controller.Value;
+            if (controller is null || !controller.IsValid)
+                return HookResult.Continue;
+
+            CCSPlayerController client = controller.As<CCSPlayerController>();
 
             // Client validity check
             if (client == null || !client.IsValid || !client.PawnIsAlive)
@@ -553,11 +611,18 @@ namespace WeaponRestrict
             switch (reason)
             {
                 case RestrictReason.Disabled when !string.IsNullOrEmpty(Config.DisabledMessage):
-                    msg = string.Format(Config.MessagePrefix + Config.DisabledMessage, weaponName);
+                    msg = PluginSafety.SafeFormat(
+                        Config.MessagePrefix + Config.DisabledMessage,
+                        $"{Config.MessagePrefix}{weaponName} is disabled.",
+                        weaponName);
                     break;
                 case RestrictReason.Disabled:
                 case RestrictReason.Limit:
-                    msg = string.Format(Config.MessagePrefix + Config.RestrictMessage, weaponName, limit.ToString());
+                    msg = PluginSafety.SafeFormat(
+                        Config.MessagePrefix + Config.RestrictMessage,
+                        $"{Config.MessagePrefix}{weaponName} is restricted to {limit} per team.",
+                        weaponName,
+                        limit.ToString());
                     break;
             }
 
