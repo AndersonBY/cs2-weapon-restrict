@@ -1,9 +1,13 @@
+> **MBSifu maintained fork.** This public fork tracks [CS2Plugins/WeaponRestrict](https://github.com/CS2Plugins/WeaponRestrict) and ships reviewed, reproducible Linux releases for MBSifu and the wider CS2 community. See [MAINTENANCE.md](MAINTENANCE.md) before proposing upstream sync or release changes.
+
+[![CI](https://github.com/AndersonBY/cs2-weapon-restrict/actions/workflows/ci.yml/badge.svg)](https://github.com/AndersonBY/cs2-weapon-restrict/actions/workflows/ci.yml)
+
 # Summary
 Allows you to restrict weapon based on a percentage quota and a hard cap.
 
 # Installation
-1. Download the `.dll` file in the releases page
-2. Create a folder named `WeaponRestrict` in `/game/csgo/addons/counterstrikesharp/plugins` and move the `WeaponRestrict.dll` into the folder you just created
+1. Download the `linux-x64.zip` asset from this fork's Releases page.
+2. Extract the archive into `/game/csgo`; it already contains the complete `addons/counterstrikesharp/plugins/WeaponRestrict` path.
 3. Start the server
 5. Configure the auto-generated config in `/game/csgo/addons/counterstrikesharp/configs/plugins/WeaponRestrict/WeaponRestrict.json` to your liking using the guide below
 6. *(Optional) Reload the plugin using `css_plugins reload [plugin index]` to update the loaded config (you can get the index by running `css_plugins list`)*
